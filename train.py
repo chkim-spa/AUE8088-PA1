@@ -16,7 +16,6 @@ import src.config as cfg
 
 torch.set_float32_matmul_precision('medium')
 
-
 if __name__ == "__main__":
 
     model = SimpleClassifier(

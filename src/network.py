@@ -13,25 +13,84 @@ import torch
 
 # Custom packages
 from src.metric import MyAccuracy
+from src.metric import MyF1Score
 import src.config as cfg
 from src.util import show_setting
 
 
 # [TODO: Optional] Rewrite this class if you want
 class MyNetwork(AlexNet):
-    def __init__(self):
+    def __init__(self, num_classes: int = 200, dropout: float = 0.5) -> None:
         super().__init__()
-
         # [TODO] Modify feature extractor part in AlexNet
 
+        self.features = nn.Sequential(
+            # kernel_size 11을 3으로 축소
+            # (11, 4, 2): 64->15
+            nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1),    # (3, 2, 1): 64 -> 33
+            nn.BatchNorm2d(64),                                      # add BN       
+            nn.GELU(),                                               # GELU는 'inplace=True'인자가 없음
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0),   # (3, 2, 1): 33 -> 30
+            nn.GELU(),                                               # ReLU->GELU
+            nn.BatchNorm2d(64),                                      # add BN
+            nn.MaxPool2d(kernel_size=3, stride=2),                   # (3, 2, 1): 30 -> 15
+ 
+            # kernel_size 5을 3으로 축소 
+            # (5, 1, 2): 7->7 
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1), # (3, 2, 1): 15 -> 7
+            nn.GELU(), 
+            nn.Conv2d(128, 192, kernel_size=3,padding=1),            # (3, 2, 1): 7 -> 7  
+            nn.GELU(),                                               # ReLU->GELU
+            nn.BatchNorm2d(192),                                     # add BN
+            nn.MaxPool2d(kernel_size=3, stride=2), 
+ 
+            nn.Conv2d(192, 384, kernel_size=3, padding=1), 
+            nn.GELU(),                                               # ReLU->GELU
+            nn.Conv2d(384, 256, kernel_size=3, padding=1), 
+            nn.GELU(),                                               # ReLU->GELU
+            nn.Conv2d(256, 256, kernel_size=3, padding=1), 
+            nn.GELU(),                                               # ReLU->GELU
+            nn.BatchNorm2d(256),                                     # add BN
+            # nn.MaxPool2d(kernel_size=3, stride=2),                   # (3, 2, 0): 7 -> 2
+        )
+        self.seblock = SEBlock(channel=256, reduction=16)
+        self.avgpool = nn.AdaptiveAvgPool2d((6, 6))
+        self.classifier = nn.Sequential(
+            nn.Dropout(p=dropout),
+            nn.Linear(256 * 6 * 6, 4096),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+            nn.Linear(4096, 4096),
+            nn.ReLU(inplace=True),
+            nn.Linear(4096, num_classes),
+        )
 
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # [TODO: Optional] Modify this as well if you want
         x = self.features(x)
+        x = self.seblock(x)
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
         x = self.classifier(x)
         return x
+
+class SEBlock(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(SEBlock, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
 
 
 class SimpleClassifier(LightningModule):
@@ -56,6 +115,7 @@ class SimpleClassifier(LightningModule):
 
         # Metric
         self.accuracy = MyAccuracy()
+        self.F1Score  = MyF1Score()
 
         # Hyperparameters
         self.save_hyperparameters()
@@ -71,7 +131,7 @@ class SimpleClassifier(LightningModule):
         scheduler_params = copy.deepcopy(self.hparams.scheduler_params)
         scheduler_type = scheduler_params.pop('type')
         scheduler = getattr(torch.optim.lr_scheduler, scheduler_type)(optimizer, **scheduler_params)
-        return {'optimizer': optimizer, 'lr_scheduler': scheduler}
+        return {'optimizer': optimizer, 'lr_scheduler': {'scheduler':scheduler, 'monitor':'loss/val'}}
 
     def forward(self, x):
         return self.model(x)
@@ -79,14 +139,16 @@ class SimpleClassifier(LightningModule):
     def training_step(self, batch, batch_idx):
         loss, scores, y = self._common_step(batch)
         accuracy = self.accuracy(scores, y)
-        self.log_dict({'loss/train': loss, 'accuracy/train': accuracy},
+        F1Score  = self.F1Score(scores, y)
+        self.log_dict({'loss/train': loss, 'accuracy/train': accuracy, 'F1Score/train' : F1Score},
                       on_step=False, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
         loss, scores, y = self._common_step(batch)
         accuracy = self.accuracy(scores, y)
-        self.log_dict({'loss/val': loss, 'accuracy/val': accuracy},
+        F1Score  = self.F1Score(scores, y)
+        self.log_dict({'loss/val': loss, 'accuracy/val': accuracy, 'F1Score/val' : F1Score},
                       on_step=False, on_epoch=True, prog_bar=True, logger=True)
         self._wandb_log_image(batch, batch_idx, scores, frequency = cfg.WANDB_IMG_LOG_FREQ)
 
